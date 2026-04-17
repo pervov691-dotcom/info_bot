@@ -125,15 +125,6 @@ def init_db():
         )
     ''')
     
-    # Таблица статистики канала (оставляем для истории, но не показываем)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS channel_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT UNIQUE,
-            subscribers_count INTEGER DEFAULT 0
-        )
-    ''')
-    
     # Таблица FAQ разделов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS faq_sections (
@@ -225,10 +216,6 @@ def init_db():
     for key, data in default_faq.items():
         cursor.execute('INSERT OR IGNORE INTO faq_sections (key, title, content, updated_at) VALUES (?, ?, ?, ?)',
                       (key, data["title"], data["content"], datetime.now().isoformat()))
-    
-    # Добавляем начальную статистику
-    today = datetime.now().strftime("%Y-%m-%d")
-    cursor.execute('INSERT OR IGNORE INTO channel_stats (date, subscribers_count) VALUES (?, 0)', (today,))
     
     conn.commit()
     conn.close()
@@ -371,20 +358,6 @@ async def get_channel_subscribers(context: ContextTypes.DEFAULT_TYPE) -> int:
     except:
         return 0
 
-async def collect_channel_stats(context: ContextTypes.DEFAULT_TYPE):
-    """Собирает статистику канала"""
-    try:
-        subs = await get_channel_subscribers(context)
-        today = datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO channel_stats (date, subscribers_count) VALUES (?, ?)', (today, subs))
-        conn.commit()
-        conn.close()
-        return subs
-    except:
-        return 0
-
 async def is_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Проверяет подписку на основной канал"""
     try:
@@ -520,28 +493,41 @@ def get_bot_analytics() -> dict:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
+    # Общее количество пользователей
     cursor.execute("SELECT COUNT(*) FROM bot_users")
     total_users = cursor.fetchone()[0] or 0
     
+    # Активные сегодня
     cursor.execute("SELECT COUNT(*) FROM bot_users WHERE date(last_active) = date('now')")
     today_active = cursor.fetchone()[0] or 0
     
+    # Всего вопросов
     cursor.execute("SELECT COUNT(*) FROM questions")
     total_questions = cursor.fetchone()[0] or 0
     
+    # Непрочитанные вопросы
     cursor.execute("SELECT COUNT(*) FROM questions WHERE status = 'new'")
     unread_questions = cursor.fetchone()[0] or 0
     
+    # Вопросов сегодня
     cursor.execute("SELECT COUNT(*) FROM questions WHERE date(created_at) = date('now')")
     today_questions = cursor.fetchone()[0] or 0
     
+    # Статистика по типам вопросов
     cursor.execute("SELECT type, COUNT(*) FROM questions GROUP BY type")
     type_stats = cursor.fetchall()
     
+    # Топ активных пользователей
     cursor.execute("SELECT username, questions_count FROM bot_users ORDER BY questions_count DESC LIMIT 5")
     top_active = cursor.fetchall()
     
     conn.close()
+    
+    # Формируем результат
+    type_stats_dict = []
+    type_names = {"question": "❓ Вопросы", "idea": "💡 Идеи", "bug": "🐛 Баги"}
+    for t, count in type_stats:
+        type_stats_dict.append((type_names.get(t, t), count))
     
     return {
         "total_users": total_users,
@@ -549,7 +535,7 @@ def get_bot_analytics() -> dict:
         "total_questions": total_questions,
         "unread_questions": unread_questions,
         "today_questions": today_questions,
-        "type_stats": type_stats,
+        "type_stats": type_stats_dict,
         "top_active": top_active
     }
 
@@ -872,9 +858,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if stats['type_stats']:
             text += f"📊 *По типам:*\n"
-            type_names = {"question": "❓ Вопросы", "idea": "💡 Идеи", "bug": "🐛 Баги"}
             for t, count in stats['type_stats']:
-                text += f"• {type_names.get(t, t)}: {count}\n"
+                text += f"• {t}: {count}\n"
         
         if stats['top_active']:
             text += f"\n🏆 *Топ активных:*\n"
@@ -1295,10 +1280,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_back_keyboard("back_to_menu"), parse_mode="Markdown"
     )
 
-async def scheduled_stats_collection(context: ContextTypes.DEFAULT_TYPE):
-    await collect_channel_stats(context)
-    print(f"📊 Статистика канала собрана: {datetime.now()}")
-
 def main():
     request = HTTPXRequest(
         connection_pool_size=10,
@@ -1309,11 +1290,6 @@ def main():
     )
     
     app = Application.builder().token(TOKEN).request(request).build()
-    
-    job_queue = app.job_queue
-    if job_queue:
-        job_queue.run_daily(scheduled_stats_collection, time=datetime.strptime("00:01", "%H:%M").time())
-        print("📊 Планировщик сбора статистики запущен")
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
