@@ -125,7 +125,7 @@ def init_db():
         )
     ''')
     
-    # Таблица статистики канала
+    # Таблица статистики канала (оставляем для истории, но не показываем)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS channel_stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,7 +180,6 @@ def init_db():
 📌 *Функции бота:*
 • Обратная связь с администратором
 • FAQ по игре «Тюряга»
-• Статистика канала
 
 👇 *Нажми на кнопки ниже, чтобы перейти:*"""
     
@@ -451,6 +450,31 @@ def get_all_questions(page: int = 0, per_page: int = 10) -> Tuple[List[dict], in
                   "status": r[5], "created_at": r[6], "answer": r[7]} for r in results]
     return questions, total
 
+def get_all_bot_users(page: int = 0, per_page: int = 15) -> Tuple[List[dict], int]:
+    """Получает всех пользователей бота с пагинацией"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM bot_users")
+    total = cursor.fetchone()[0]
+    offset = page * per_page
+    cursor.execute('''
+        SELECT user_id, username, first_seen, last_active, questions_count, is_verified
+        FROM bot_users ORDER BY first_seen DESC LIMIT ? OFFSET ?
+    ''', (per_page, offset))
+    results = cursor.fetchall()
+    conn.close()
+    users = []
+    for r in results:
+        users.append({
+            "user_id": r[0], 
+            "username": r[1] or "Аноним", 
+            "first_seen": r[2][:19] if r[2] else "Неизвестно", 
+            "last_active": r[3][:19] if r[3] else "Неизвестно", 
+            "questions_count": r[4],
+            "is_verified": r[5]
+        })
+    return users, total
+
 def mark_question_answered(q_id: int, answer: str):
     """Отмечает вопрос отвеченным"""
     conn = sqlite3.connect(DB_NAME)
@@ -490,63 +514,6 @@ def update_faq_section(key: str, content: str):
                   (content, datetime.now().isoformat(), key))
     conn.commit()
     conn.close()
-
-def get_channel_analytics() -> dict:
-    """Получает аналитику канала"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT date, subscribers_count FROM channel_stats ORDER BY date")
-    all_data = cursor.fetchall()
-    
-    if not all_data:
-        conn.close()
-        return {"has_data": False, "message": "📊 Статистика пока не собрана\n\nНажми «Обновить статистику»."}
-    
-    dates = [d[0] for d in all_data]
-    subs = [d[1] for d in all_data]
-    
-    first_date = dates[0]
-    last_date = dates[-1]
-    first_subs = subs[0]
-    last_subs = subs[-1]
-    max_subs = max(subs)
-    total_growth = last_subs - first_subs
-    days_count = len(dates)
-    avg_daily_growth = total_growth / days_count if days_count > 0 else 0
-    
-    forecast_30 = last_subs + int(avg_daily_growth * 30)
-    forecast_90 = last_subs + int(avg_daily_growth * 90)
-    
-    # Рост по месяцам
-    monthly = {}
-    for date, sub in all_data:
-        month = date[:7]
-        if month not in monthly:
-            monthly[month] = {"first": sub, "last": sub}
-        monthly[month]["last"] = sub
-    
-    month_growth = []
-    for month in sorted(monthly.keys())[-6:]:
-        data = monthly[month]
-        growth = data["last"] - data["first"]
-        month_growth.append({"month": month, "growth": growth})
-    
-    conn.close()
-    
-    return {
-        "has_data": True,
-        "first_date": first_date,
-        "last_date": last_date,
-        "first_subs": first_subs,
-        "last_subs": last_subs,
-        "max_subs": max_subs,
-        "total_growth": total_growth,
-        "avg_daily_growth": avg_daily_growth,
-        "forecast_30": forecast_30,
-        "forecast_90": forecast_90,
-        "month_growth": month_growth
-    }
 
 def get_bot_analytics() -> dict:
     """Получает аналитику бота"""
@@ -601,16 +568,27 @@ def get_main_keyboard(user_id: int = None):
 def get_admin_keyboard():
     keyboard = [
         [InlineKeyboardButton("💬 Вопросы", callback_data="admin_questions")],
-        [InlineKeyboardButton("📊 Статистика канала", callback_data="admin_channel_stats")],
+        [InlineKeyboardButton("👥 Пользователи бота", callback_data="admin_users")],
         [InlineKeyboardButton("🤖 Статистика бота", callback_data="admin_bot_stats")],
         [InlineKeyboardButton("📝 Редактировать FAQ", callback_data="admin_edit_faq")],
         [InlineKeyboardButton("✏️ Редактировать «О боте»", callback_data="admin_edit_about")],
         [InlineKeyboardButton("🔘 Редактировать кнопки «О боте»", callback_data="admin_edit_about_buttons")],
         [InlineKeyboardButton("📢 Редактировать «Объявления»", callback_data="admin_edit_announcements")],
         [InlineKeyboardButton("📤 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("🔄 Обновить статистику", callback_data="admin_refresh_stats")],
         [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")]
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_users_list_keyboard(page: int = 0, total_pages: int = 0):
+    keyboard = []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ Назад", callback_data=f"admin_users_page_{page-1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"admin_users_page_{page+1}"))
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("🔙 Назад в админку", callback_data="admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_faq_menu_keyboard():
@@ -848,6 +826,64 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("👑 *Админ-панель*", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
         return
     
+    # Список пользователей бота
+    if data == "admin_users" and user_id in ADMIN_IDS:
+        context.user_data['admin_users_page'] = 0
+        users, total = get_all_bot_users(0, 15)
+        pages = (total + 14) // 15
+        if not users:
+            await query.edit_message_text("👥 Нет пользователей!", reply_markup=get_back_keyboard("admin_panel"))
+            return
+        text = f"👥 *Пользователи бота (стр.1/{pages})*\n\n"
+        for i, u in enumerate(users, 1):
+            verified = "✅" if u['is_verified'] else "❌"
+            text += f"{i}. *{u['username']}* (ID: {u['user_id']})\n"
+            text += f"   📅 Зарегистрирован: {u['first_seen']}\n"
+            text += f"   📊 Вопросов: {u['questions_count']} | Статус: {verified}\n\n"
+        await query.edit_message_text(text, reply_markup=get_users_list_keyboard(0, pages), parse_mode="Markdown")
+        return
+    
+    # Пагинация пользователей
+    if data.startswith("admin_users_page_") and user_id in ADMIN_IDS:
+        page = int(data.split("_")[3])
+        context.user_data['admin_users_page'] = page
+        users, total = get_all_bot_users(page, 15)
+        pages = (total + 14) // 15
+        text = f"👥 *Пользователи бота (стр.{page+1}/{pages})*\n\n"
+        for i, u in enumerate(users, page*15+1):
+            verified = "✅" if u['is_verified'] else "❌"
+            text += f"{i}. *{u['username']}* (ID: {u['user_id']})\n"
+            text += f"   📅 Зарегистрирован: {u['first_seen']}\n"
+            text += f"   📊 Вопросов: {u['questions_count']} | Статус: {verified}\n\n"
+        await query.edit_message_text(text, reply_markup=get_users_list_keyboard(page, pages), parse_mode="Markdown")
+        return
+    
+    # Статистика бота
+    if data == "admin_bot_stats" and user_id in ADMIN_IDS:
+        stats = get_bot_analytics()
+        text = f"🤖 *СТАТИСТИКА БОТА*\n\n"
+        text += f"👥 *Всего пользователей:* {stats['total_users']}\n"
+        text += f"🟢 *Активны сегодня:* {stats['today_active']}\n"
+        text += f"📊 *Конверсия:* {int(stats['today_active']/stats['total_users']*100) if stats['total_users'] > 0 else 0}%\n\n"
+        text += f"💬 *Вопросы:*\n"
+        text += f"• Всего: {stats['total_questions']}\n"
+        text += f"• Сегодня: {stats['today_questions']}\n"
+        text += f"• Непрочитанных: {stats['unread_questions']}\n\n"
+        
+        if stats['type_stats']:
+            text += f"📊 *По типам:*\n"
+            type_names = {"question": "❓ Вопросы", "idea": "💡 Идеи", "bug": "🐛 Баги"}
+            for t, count in stats['type_stats']:
+                text += f"• {type_names.get(t, t)}: {count}\n"
+        
+        if stats['top_active']:
+            text += f"\n🏆 *Топ активных:*\n"
+            for i, (name, count) in enumerate(stats['top_active'], 1):
+                text += f"{i}. {name or 'Аноним'} — {count} вопросов\n"
+        
+        await query.edit_message_text(text, reply_markup=get_back_keyboard("admin_panel"), parse_mode="Markdown")
+        return
+    
     # Редактирование "О боте" (текст)
     if data == "admin_edit_about" and user_id in ADMIN_IDS:
         current_content = get_about_content()
@@ -1017,61 +1053,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ Вопрос #{q_id} отмечен прочитанным!", reply_markup=get_back_keyboard("admin_questions"))
         return
     
-    # Статистика канала
-    if data == "admin_channel_stats" and user_id in ADMIN_IDS:
-        await collect_channel_stats(context)
-        stats = get_channel_analytics()
-        if not stats["has_data"]:
-            await query.edit_message_text(stats["message"], reply_markup=get_back_keyboard("admin_panel"), parse_mode="Markdown")
-            return
-        text = f"📊 *СТАТИСТИКА КАНАЛА*\n\n"
-        text += f"📌 *Канал:* {CHANNEL_ID}\n"
-        text += f"📅 *Период:* {stats['first_date']} — {stats['last_date']}\n\n"
-        text += f"👥 *Подписчиков:*\n"
-        text += f"• Первый замер: {stats['first_subs']:,}\n"
-        text += f"• Текущие: {stats['last_subs']:,}\n"
-        text += f"• Максимум: {stats['max_subs']:,}\n\n"
-        text += f"📈 *Рост:*\n"
-        text += f"• За всё время: {stats['total_growth']:+d}\n"
-        text += f"• В среднем в день: {stats['avg_daily_growth']:+.1f}\n\n"
-        text += f"🔮 *Прогноз:*\n"
-        text += f"• Через месяц: {stats['forecast_30']:,}\n"
-        text += f"• Через 3 месяца: {stats['forecast_90']:,}\n"
-        
-        if stats['month_growth']:
-            text += f"\n📆 *Рост по месяцам:*\n"
-            for m in stats['month_growth'][-6:]:
-                text += f"• {m['month']}: {m['growth']:+d}\n"
-        
-        await query.edit_message_text(text, reply_markup=get_back_keyboard("admin_panel"), parse_mode="Markdown")
-        return
-    
-    # Статистика бота
-    if data == "admin_bot_stats" and user_id in ADMIN_IDS:
-        stats = get_bot_analytics()
-        text = f"🤖 *СТАТИСТИКА БОТА*\n\n"
-        text += f"👥 *Пользователей:* {stats['total_users']}\n"
-        text += f"🟢 *Активны сегодня:* {stats['today_active']}\n"
-        text += f"📊 *Конверсия:* {int(stats['today_active']/stats['total_users']*100) if stats['total_users'] > 0 else 0}%\n\n"
-        text += f"💬 *Вопросы:*\n"
-        text += f"• Всего: {stats['total_questions']}\n"
-        text += f"• Сегодня: {stats['today_questions']}\n"
-        text += f"• Непрочитанных: {stats['unread_questions']}\n\n"
-        
-        if stats['type_stats']:
-            text += f"📊 *По типам:*\n"
-            type_names = {"question": "❓ Вопросы", "idea": "💡 Идеи", "bug": "🐛 Баги"}
-            for t, count in stats['type_stats']:
-                text += f"• {type_names.get(t, t)}: {count}\n"
-        
-        if stats['top_active']:
-            text += f"\n🏆 *Топ активных:*\n"
-            for i, (name, count) in enumerate(stats['top_active'], 1):
-                text += f"{i}. {name or 'Аноним'} — {count} вопросов\n"
-        
-        await query.edit_message_text(text, reply_markup=get_back_keyboard("admin_panel"), parse_mode="Markdown")
-        return
-    
     # Редактирование FAQ
     if data == "admin_edit_faq" and user_id in ADMIN_IDS:
         await query.edit_message_text(
@@ -1099,16 +1080,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['admin_action'] = 'broadcast'
         await query.edit_message_text(
             "📤 *Рассылка*\n\nВведи текст сообщения для всех пользователей (можно использовать Markdown):",
-            reply_markup=get_back_keyboard("admin_panel"), parse_mode="Markdown"
-        )
-        return
-    
-    # Обновить статистику
-    if data == "admin_refresh_stats" and user_id in ADMIN_IDS:
-        await query.edit_message_text("🔄 Собираю статистику...", parse_mode="Markdown")
-        subs = await collect_channel_stats(context)
-        await query.edit_message_text(
-            f"✅ Статистика обновлена!\n\n📊 Подписчиков канала: {subs}",
             reply_markup=get_back_keyboard("admin_panel"), parse_mode="Markdown"
         )
         return
